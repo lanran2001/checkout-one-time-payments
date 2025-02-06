@@ -4,6 +4,12 @@ async function setupPayment() {
     // 调用Go后端创建SetupIntent
     const response = await fetch('/create-setup-intent', {
         method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            CustomerId: 'cus_RazwBE0EYQAP7u',
+        }),
     });
     const data = await response.json();
 

@@ -27,27 +27,39 @@ func init() {
 	stripe.Key = "sk_test_51PGYMiRoUfb6BI4plZXZUQMlXEs1VC9UXWXOhoh20oLIcOMoDxqD4gdzCYFYjLzc7BUPjk3qDLpVDUqSBj8FmzaQ008BDyK1QF"
 }
 
+type CreateIntentRequest struct {
+	CustomerId string `json:"customerId"`
+}
+
 func handleCreateSetupIntent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	// 创建customer
-	customerParams := &stripe.CustomerParams{
-		Email: stripe.String("555@qq.com"),
-	}
-
-	newCustomer, err := customer.New(customerParams)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	var req CreateIntentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	fmt.Println("newCustomer.ID:", newCustomer.ID)
+	customerId := req.CustomerId
+	if req.CustomerId == "" {
+		// 创建customer
+		customerParams := &stripe.CustomerParams{
+			Email: stripe.String("555@qq.com"),
+		}
+
+		newCustomer, err := customer.New(customerParams)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fmt.Println("newCustomer.ID:", newCustomer.ID)
+		customerId = newCustomer.ID
+	}
 
 	// 创建SetupIntent
 	params := &stripe.SetupIntentParams{
-		Customer: stripe.String(newCustomer.ID),
+		Customer: stripe.String(customerId),
 		PaymentMethodTypes: stripe.StringSlice([]string{
 			"card",
 		}),
@@ -65,7 +77,7 @@ func handleCreateSetupIntent(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("intent.ClientSecret:", intent.ClientSecret)
 	json.NewEncoder(w).Encode(SetupIntentResponse{
 		ClientSecret: intent.ClientSecret,
-		CustomerId:   newCustomer.ID,
+		CustomerId:   customerId,
 	})
 }
 
@@ -137,6 +149,10 @@ type ChargeRequest struct {
 	PaymentMethodId string `json:"paymentMethodId"`
 }
 
+type QueryPaymentMethodRequest struct {
+	CustomerId string `json:"customerId"`
+}
+
 func handleCharge(w http.ResponseWriter, r *http.Request) {
 	var req ChargeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -194,6 +210,93 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
+
+type SetDefaultRequest struct {
+	CustomerId      string `json:"customerId"`
+	PaymentMethodId string `json:"paymentMethodId"`
+}
+
+func setDefaultPaymentMethod(w http.ResponseWriter, r *http.Request) {
+	// 获取 customer_id 和 payment_method_id（假设从请求中获取）
+	var req SetDefaultRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.CustomerId == "" || req.PaymentMethodId == "" {
+		http.Error(w, "customer_id and payment_method_id are required", http.StatusBadRequest)
+		return
+	}
+
+	// 修改客户信息，将某张卡设置为默认支付方式
+	params := &stripe.CustomerParams{}
+	params.InvoiceSettings = &stripe.CustomerInvoiceSettingsParams{}
+	params.InvoiceSettings.DefaultPaymentMethod = stripe.String(req.PaymentMethodId)
+
+	//params.AddInvoiceSettings("default_payment_method", paymentMethodID)
+
+	_, err := customer.Update(req.CustomerId, params)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to set default payment method: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// 返回成功信息
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+}
+
+func listPaymentMethods(w http.ResponseWriter, r *http.Request) {
+	// 获取 customerId（假设从请求参数获取）
+	var req QueryPaymentMethodRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	customerID := req.CustomerId
+	if customerID == "" {
+		http.Error(w, "customer_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// 查询绑定的支付方式（银行卡）
+	params := &stripe.PaymentMethodListParams{
+		Customer: stripe.String(customerID),
+		Type:     stripe.String("card"),
+	}
+
+	i := paymentmethod.List(params)
+
+	var paymentMethods []map[string]interface{}
+	for i.Next() {
+		pm := i.PaymentMethod()
+		card := pm.Card
+		paymentMethods = append(paymentMethods, map[string]interface{}{
+			"id":       pm.ID,
+			"brand":    card.Brand,
+			"last4":    card.Last4,
+			"expMonth": card.ExpMonth,
+			"expYear":  card.ExpYear,
+		})
+	}
+
+	// 获取用户默认支付方式
+	customerParams := &stripe.CustomerParams{}
+	customer, err := customer.Get(customerID, customerParams)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to fetch customer: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// 获取默认支付方式 ID
+	defaultPaymentMethodID := customer.InvoiceSettings.DefaultPaymentMethod.ID
+	fmt.Println("defaultPaymentMethodID:", defaultPaymentMethodID)
+
+	// 返回 JSON 结果
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(paymentMethods)
+}
+
 func main() {
 	// 添加静态文件服务
 	fs := http.FileServer(http.Dir("static"))
@@ -202,6 +305,8 @@ func main() {
 	// 原有的API路由
 	http.HandleFunc("/create-setup-intent", handleCreateSetupIntent)
 	http.HandleFunc("/save-payment-method", handleSavePaymentMethod)
+	http.HandleFunc("/list-payment-methods", listPaymentMethods)
+	http.HandleFunc("/set-default-payment-method", setDefaultPaymentMethod)
 	http.HandleFunc("/charge", handleCharge)
 
 	log.Printf("Server starting on http://localhost:8080")
